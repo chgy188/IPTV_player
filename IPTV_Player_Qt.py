@@ -1,15 +1,13 @@
 import sys
-from PyQt5.QtWidgets import QSizePolicy,QDesktopWidget,QApplication, QMainWindow, QListWidget, QListWidgetItem, QVBoxLayout,QHBoxLayout, QWidget, QMenu, QAction, QMessageBox, QLabel, QFileDialog,QStyle
+from PyQt5.QtWidgets import QSizePolicy,QApplication, QMainWindow, QListWidget, QHBoxLayout, QWidget, QMenu, QAction, QMessageBox, QLabel, QFileDialog
 from PyQt5.QtGui import QImage,QPixmap
-from PyQt5.QtCore import Qt, QThread, pyqtSignal
-import subprocess
+from PyQt5.QtCore import Qt, QThread
 import csv
 import os
 import requests
 import pickle
 from ffpyplayer.player import MediaPlayer
 import time
-from PIL import Image, ImageTk
 import threading
 
 class CustomQListWidget(QListWidget):
@@ -26,24 +24,39 @@ class CustomQListWidget(QListWidget):
         menu.exec_(self.mapToGlobal(position))
 
 class FullScreenPlayer(QMainWindow):
-    def __init__(self, pixmap,play_program_func,channel_Url):
+    def __init__(self, pixmap,play_program_func,channel_Url,close_func):
         super().__init__()
         self.initUI(pixmap)
         self.play_program_func = play_program_func
         self.channel_Url = channel_Url
-
+        self.close_func = close_func
     def initUI(self, pixmap):
         self.setWindowTitle('Full Screen Player')
         self.showFullScreen()
         self.image_label = QLabel(self)
         self.image_label.setAlignment(Qt.AlignCenter)
-        self.image_label.setPixmap(pixmap)
+        
+        #获取屏幕尺寸，将image_label的大小设置为屏幕尺寸
+        screen = QApplication.desktop().screenGeometry()
+        screensize = screen.size()
+        print(f"screensize: {screensize.width()}, {screensize.height()}")
+        self.image_label.resize(screensize.width(), screensize.height())
         self.setCentralWidget(self.image_label)
-    
     def mouseDoubleClickEvent(self, event):
+        #关闭play_program_func
+
+        self.close_func()
+        window.play_program(window.image_label,self.channel_Url)
         window.show()
         self.close()
-    
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape:
+            self.close_func()
+            window.play_program(window.image_label,self.channel_Url)
+            window.show()
+            self.close()
+        else:
+            super().keyPressEvent(event)
     def start_playing(self):
         self.play_program_func(self.image_label,self.channel_Url)
 
@@ -62,6 +75,7 @@ class IPTVPlayer(QMainWindow):
         self.create_layout()
         self.current_channel = None
         self.player = None
+        self.full_screen_player = None
         if len(channels) > 0:
             self.load_groups('')
 
@@ -245,14 +259,15 @@ class IPTVPlayer(QMainWindow):
         self.thread.start()
     
     def swap_fullscreen(self,event=None):
-        self.stop_playback()
-        # 隐藏主窗口
-        self.hide()
-
-        # 新建一个全屏窗口播放视频
-        self.full_screen_player = FullScreenPlayer(self.photo, self.play_program, self.current_channel)
-        self.full_screen_player.show() 
-        self.full_screen_player.start_playing()
+        if self.thread and self.thread.isRunning():
+            self.stop_playback()
+            self.hide() 
+            # 新建一个全屏窗口播放视频
+            self.full_screen_player = FullScreenPlayer(self.photo, self.play_program, self.current_channel,self.stop_playback)        
+            self.full_screen_player.start_playing()
+            self.full_screen_player.show() 
+               
+       
 
     def on_group_select(self):
         global selected_group
