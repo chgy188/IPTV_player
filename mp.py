@@ -233,7 +233,7 @@ class IPTVPlayer(QMainWindow):
         self.messagebox = QMessageBox
         self.progress_bar = QProgressBar(self)        
         self.progress_bar.setVisible(False)
-        self.progress_bar.setFixedWidth(self.width())
+       
 
         # 添加进度条控件
         self.slider = CustomSlider(self)
@@ -264,7 +264,7 @@ class IPTVPlayer(QMainWindow):
         
         # self.video_size = [(self.width() - self.group_list.width() - self.program_list.width()-80), self.height()-40] 
         self.image_label.setFixedSize(self.video_size[0], self.video_size[1]) 
-        print(f"初始化：{self.video_size[1]}")
+        
         self.slider.setFixedWidth(self.video_size[0]) 
         # self.photo = QPixmap('iptv.jpg')  # 替换为实际图像路径
         # self.image_label.setPixmap(self.photo.scaled(self.image_label.size(), Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation))# self.image_label.setScaledContents(True)        
@@ -276,8 +276,7 @@ class IPTVPlayer(QMainWindow):
         self.image_label.mouseDoubleClickEvent =self.swap_fullscreen
         # 添加 QTextEdit 控件
         self.text_edit = QTextEdit(self)
-        self.text_edit.setFixedWidth(self.width())
-        self.text_edit.setFixedHeight(self.height())
+        
         self.text_edit.setReadOnly(True)
         self.text_edit.setLineWrapMode(QTextEdit.NoWrap)
         self.text_edit.setVisible(False)
@@ -410,7 +409,7 @@ class IPTVPlayer(QMainWindow):
         self.group_list.hide()
         self.program_list.hide()
         self.image_label.hide()
-        self.stop_playback()
+        
         self.text_edit.setVisible(True)
         self.progress_bar.setMaximum(len(channels))  # 设置进度条的最大值
         self.progress_bar.setValue(0)  # 初始化进度条的值
