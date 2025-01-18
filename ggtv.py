@@ -1,6 +1,7 @@
-#version 1.1.6
+#version 1.1.7
 # 2023.12.11
 #将数据结构由列表改为字典嵌套
+#增加收藏功能
 
 import sys
 from PySide6.QtWidgets import QComboBox,QLineEdit,QToolBar, QPushButton, QSlider, QTextEdit, QVBoxLayout, QProgressBar, QSizePolicy, QApplication, QMainWindow, QListWidget, QHBoxLayout, QWidget, QMenu, QMessageBox, QLabel, QFileDialog, QInputDialog
@@ -38,28 +39,43 @@ class CustomQListWidget(QListWidget):
         super().__init__(parent)
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self.show_right_click_menu)
-        # 检查并缓存父窗口的属性
-        if hasattr(parent, 'channels'):
-            self.channels = parent.channels
-        else:
-            self.channels = {}
+        self.parent=parent
+        
      
 
     def show_right_click_menu(self, position):
-        menu = QMenu(self)
+        menu = QMenu(self)         
+        add_fav_action = QAction("收藏/取消", self)
+        add_fav_action.triggered.connect(self.add_fav)
         delete_action = QAction("删除", self)
         delete_action.triggered.connect(self.remove_program)
         copy_url = QAction("拷贝链接", self)
         copy_url.triggered.connect(self.url_clipboard)
+        menu.addAction(add_fav_action)
         menu.addAction(copy_url)
         menu.addAction(delete_action)
         menu.exec(self.mapToGlobal(position))
-
+        
+    def add_fav(self):
+        selected_item = self.currentItem()
+        if selected_item:
+            name = selected_item.text()
+            if self.parent.selected_group !="我的收藏":
+                if "我的收藏" not in self.parent.channels.keys():    #在self.channels中添加该组下的该节目                    
+                    self.parent.channels["我的收藏"]={}
+                    self.parent.group_list.insertItem(0,"我的收藏")
+                self.parent.channels["我的收藏"][name]=self.parent.channels[self.parent.selected_group][name]  
+                QMessageBox.information(self, "提示", "我的收藏成功")          
+            else:
+                del self.parent.channels["我的收藏"][name]
+                self.takeItem(self.row(selected_item))
+                QMessageBox.information(self, "提示", "取消我的收藏成功")      
+    
     def url_clipboard(self):
         selected_item = self.currentItem()
         if selected_item:
             name = selected_item.text()
-            QApplication.clipboard().setText(self.channels[self.parent().parent().selected_group][name])
+            QApplication.clipboard().setText(self.parent.channels[self.parent.selected_group][name])
             
 
     def remove_program(self):
@@ -67,7 +83,10 @@ class CustomQListWidget(QListWidget):
         if selected_item:
             name = selected_item.text()
             #在self.channels中删除该组下的该节目
-            del self.channels[self.parent().parent().selected_group][name]
+            del self.parent.channels[self.parent.selected_group][name]            
+            #删除该节目的列表
+            self.takeItem(self.row(selected_item))
+            
             
             
 
@@ -398,7 +417,7 @@ class IPTVPlayer(QMainWindow):
     def show_help_dialog(self):
         QMessageBox.information(self,"帮助", "支持媒体文件拖拽播放\n\n支持视频录制\n\n支持频道可用测试\n\n鼠标：\n\n单击视频显示频道菜单\n\n双击全屏\n\n鼠标滚轮切换频道\n\n快捷键：\n\n回车：全屏/退出全屏\n\n空格：暂停/播放\n\n左右键：快退/快进10秒\n\nP：截图\n\nESC：退出全屏")
     def show_about_dialog(self):
-        QMessageBox.information(self,"关于", "蝈蝈直播TV 1.1.6\n\nCopyright © 2024-2025 蝈蝈直播TV\n\n作者: Robin Guo\n\n本软件遵循GPLv3协议开源,请遵守开源协议。\n\nhttps://github.com/chgy188/IPTV_player")
+        QMessageBox.information(self,"关于", "蝈蝈直播TV 1.1.7\n\nCopyright © 2024-2025 蝈蝈直播TV\n\n作者: Robin Guo\n\n本软件遵循GPLv3协议开源,请遵守开源协议。\n\nhttps://github.com/chgy188/IPTV_player")
     def load_m3u(self):
         if self.switch_combo_box.currentText() in self.m3u_dict:
             self.load_groups(self.m3u_dict[self.switch_combo_box.currentText()])
@@ -533,6 +552,9 @@ class IPTVPlayer(QMainWindow):
                             self.current_m3u = text
                             self.reload_button.setEnabled(True)
                             self.edit_button.setEnabled(True)
+                            #修改窗口标题
+                            self.setWindowTitle(f"蝈蝈直播TV -当前直播源: {text}")
+                            
         else: 
              if self.player:
                     self.player.toggle_pause()       
@@ -613,7 +635,11 @@ class IPTVPlayer(QMainWindow):
                 
         self.group_list.clear()
         self.program_list.clear()
-        self.group_list.addItems(list(self.channels.keys()))
+        cat_list=list(self.channels.keys())
+        if "我的收藏" in cat_list:
+            cat_list.remove("我的收藏")
+            cat_list.insert(0, "我的收藏")
+        self.group_list.addItems(cat_list)
         self.group_list.setCurrentRow(0)
         # self.adjust_list_widget_width(self.group_list)
         self.group_list.show()
@@ -851,6 +877,8 @@ class IPTVPlayer(QMainWindow):
             self.play_path(self.current_media,tv=True)
         else:
             self.stop_playback()
+            self.player.close_player()
+            self.player=None
 
     def swap_fullscreen(self, event=None):
         if self.image_label.isVisible():
