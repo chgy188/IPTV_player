@@ -456,7 +456,7 @@ class IPTVPlayer(QMainWindow):
         self.toolbar.hide()
 
     def show_help_dialog(self):
-        QMessageBox.information(self,"帮助", "支持媒体文件拖拽播放\n\n支持视频录制\n\n支持频道可用测试\n\n鼠标：\n\n单击视频显示频道菜单\n\n双击全屏\n\n鼠标滚轮切换频道\n\n快捷键：\n\n回车：全屏/退出全屏\n\n空格：暂停/播放\n\n左右键：快退/快进10秒\n\nP：截图\n\nESC：退出全屏")
+        QMessageBox.information(self,"帮助", "支持媒体文件拖拽播放\n\n支持Ctrl+V播放粘贴板地址\n\n支持视频录制\n\n支持频道可用测试\n\n鼠标：\n\n单击视频显示频道菜单\n\n双击全屏\n\n鼠标滚轮切换频道\n\n快捷键：\n\n回车：全屏/退出全屏\n\n空格：暂停/播放\n\n左右键：快退/快进10秒\n\nP：截图\n\nESC：退出全屏")
     def show_about_dialog(self):
         QMessageBox.information(self,"关于", "蝈蝈直播TV 1.1.8\n\nCopyright © 2024-2025 蝈蝈直播TV\n\n作者: Robin Guo\n\n本软件遵循GPLv3协议开源,请遵守开源协议。\n\nhttps://github.com/chgy188/IPTV_player")
     def load_m3u(self):
