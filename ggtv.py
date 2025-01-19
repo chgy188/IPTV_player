@@ -1,11 +1,13 @@
-#version 1.1.7
+#version 1.1.8
 # 2023.12.11
 #将数据结构由列表改为字典嵌套
 #增加收藏功能
-
+#增加错误信息显示在窗口标题
+#增加Ctrl+V直接播放URL视频
+#增加视频右键菜单，整理收藏逻辑
 import sys
 from PySide6.QtWidgets import QComboBox,QLineEdit,QToolBar, QPushButton, QSlider, QTextEdit, QVBoxLayout, QProgressBar, QSizePolicy, QApplication, QMainWindow, QListWidget, QHBoxLayout, QWidget, QMenu, QMessageBox, QLabel, QFileDialog, QInputDialog
-from PySide6.QtGui import QTextCursor,QWheelEvent, QImage, QPixmap, QIcon, QKeyEvent, QMouseEvent, QPalette, QColor, QAction
+from PySide6.QtGui import QKeySequence, QShortcut,QTextCursor,QWheelEvent, QImage, QPixmap, QIcon, QKeyEvent, QMouseEvent, QPalette, QColor, QAction
 from PySide6.QtCore import Qt, QThread, Signal,QTimer
 import requests
 from ffpyplayer.player import MediaPlayer
@@ -23,12 +25,13 @@ import re
 
 def player_log_callback(message,level):
     message = message.strip()
+    
     if message :        
+        window.setWindowTitle(f"蝈蝈直播TV  出错: {message}" )   
         # if loglevels[level] <= loglevels["error"] and window.current_media in message:
         try:
-            if window.current_media in message:
-                print(message)
-                window.handle_error()    
+            if window.current_media in message:                
+                window.switch_program("down")            
         except:
             pass
     return 0    
@@ -76,7 +79,8 @@ class CustomQListWidget(QListWidget):
         if selected_item:
             name = selected_item.text()
             QApplication.clipboard().setText(self.parent.channels[self.parent.selected_group][name])
-            
+
+         
 
     def remove_program(self):
         selected_item = self.currentItem()
@@ -85,8 +89,7 @@ class CustomQListWidget(QListWidget):
             #在self.channels中删除该组下的该节目
             del self.parent.channels[self.parent.selected_group][name]            
             #删除该节目的列表
-            self.takeItem(self.row(selected_item))
-            
+            self.takeItem(self.row(selected_item)) 
             
             
 
@@ -137,21 +140,42 @@ class CustomQLabel(QLabel):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setMouseTracking(True)
+        # self.setContextMenuPolicy(Qt.CustomContextMenu)
+        # self.customContextMenuRequested.connect(self.show_right_click_menu)
+        self.parent=parent
     def mouseMoveEvent(self, event):
         # 获取鼠标位置
-        self.parent().parent().show_slider()
+        self.parent.show_slider()
         super().mouseMoveEvent(event)
 
     def mousePressEvent(self, event: QMouseEvent):
         if event.button() == Qt.LeftButton:
-            if self.parent().parent().channels:
-                
-                self.parent().parent().toggle_list()
+            if self.parent.channels:                
+                self.parent.toggle_list()
             super().mousePressEvent(event)
         else:
+            #显示右键菜单
+            self.show_fav_menu(event.pos())
             super().mousePressEvent(event)
+    def show_fav_menu(self, position):
+        menu = QMenu(self)         
+        add_fav_action = QAction("收藏", self)
+        add_fav_action.triggered.connect(self.add_fav)        
+        menu.addAction(add_fav_action)        
+        menu.exec(self.mapToGlobal(position))
 
+    def add_fav(self):
+        
+        if self.parent.input_path is not None:          
+            text, ok = QInputDialog.getText(self, '提示', '起个名字')  
+            if ok and text != '':
+                if "我的收藏" not in self.parent.channels.keys():    #在self.channels中添加该组下的该节
+                    self.parent.channels["我的收藏"]={}
+                    self.parent.group_list.insertItem(0,"我的收藏")
+                self.parent.channels["我的收藏"][text]=self.parent.input_path
+                
 
+            
 class IPTVPlayer(QMainWindow):
 
     player_end=Signal()
@@ -167,7 +191,7 @@ class IPTVPlayer(QMainWindow):
                 config = json.load(f)
             
             # 加载 channels 列表
-            self.channels = config.get('channels', {})            
+            self.channels = config.get('channels',  {'我的收藏': {}})            
             # 加载当前样式
             current_theme = config.get('current_theme', 'dark')
             selected_group_index = config.get('selected_group_index', 0)
@@ -180,7 +204,7 @@ class IPTVPlayer(QMainWindow):
             else:
                 self.set_light_theme()
         except FileNotFoundError:
-            self.channels = {}
+            self.channels = {'我的收藏': {}}
             selected_group_index = None
             selected_program_index = None
             self.set_dark_theme()
@@ -203,6 +227,7 @@ class IPTVPlayer(QMainWindow):
         self.player = None
         
         self.current_media = None
+        self.input_path=None
         self.video_window = None
         self.Duration = None
         self.record = False
@@ -230,10 +255,26 @@ class IPTVPlayer(QMainWindow):
         self.slider.setVisible(False)
         set_log_callback(player_log_callback)
 
-    def handle_error(self):
-        self.switch_program("down")
+        # 创建一个快捷键Ctrl+V
+        shortcut = QShortcut(QKeySequence("Ctrl+V"), self)
+        shortcut.activated.connect(self.paste_from_clipboard)
+    # def handle_error(self,msg=None):
+    #     self.setWindowTitle(f"{self.windowTitle()} 状态： {msg}" )   
+    #     self.switch_program("down")
     
-    
+    def paste_from_clipboard(self):
+        # 获取系统剪贴板
+        clipboard = QApplication.clipboard()
+        self.input_path=clipboard.text()
+        if self.input_path.startswith("http"):
+            
+            try:
+                self.setWindowTitle(f"蝈蝈直播TV -当前直播源: {self.input_path} -加载中...")      
+                self.play_path(self.input_path)
+                self.Duration = None            
+            except Exception as e:
+                self.setWindowTitle(f"蝈蝈直播TV -当前直播源: {self.input_path} -加载失败")      
+            
     def screen_shot(self):
         #将self.image 保存为图片文件
         current_time = time.strftime("%Y%m%d%H%M%S")
@@ -417,7 +458,7 @@ class IPTVPlayer(QMainWindow):
     def show_help_dialog(self):
         QMessageBox.information(self,"帮助", "支持媒体文件拖拽播放\n\n支持视频录制\n\n支持频道可用测试\n\n鼠标：\n\n单击视频显示频道菜单\n\n双击全屏\n\n鼠标滚轮切换频道\n\n快捷键：\n\n回车：全屏/退出全屏\n\n空格：暂停/播放\n\n左右键：快退/快进10秒\n\nP：截图\n\nESC：退出全屏")
     def show_about_dialog(self):
-        QMessageBox.information(self,"关于", "蝈蝈直播TV 1.1.7\n\nCopyright © 2024-2025 蝈蝈直播TV\n\n作者: Robin Guo\n\n本软件遵循GPLv3协议开源,请遵守开源协议。\n\nhttps://github.com/chgy188/IPTV_player")
+        QMessageBox.information(self,"关于", "蝈蝈直播TV 1.1.8\n\nCopyright © 2024-2025 蝈蝈直播TV\n\n作者: Robin Guo\n\n本软件遵循GPLv3协议开源,请遵守开源协议。\n\nhttps://github.com/chgy188/IPTV_player")
     def load_m3u(self):
         if self.switch_combo_box.currentText() in self.m3u_dict:
             self.load_groups(self.m3u_dict[self.switch_combo_box.currentText()])
@@ -536,7 +577,9 @@ class IPTVPlayer(QMainWindow):
             "Media Files (*.m3u *.mp4 *.avi *.mkv *.mov *.flv *.wmv *.mp3 *.wav *.ogg *.flac *.rm *.rmvb *.ts *.m4v *.3gp);;All Files (*)"
         )
         if file_path:
-            if choice==QMessageBox.No:
+            if choice==QMessageBox.No:                
+                self.setWindowTitle(f"蝈蝈直播TV -当前直播源: {file_path} -加载中...") 
+                self.input_path = file_path
                 self.play_path(file_path)
                 self.Duration = None
             else:
@@ -625,6 +668,9 @@ class IPTVPlayer(QMainWindow):
                                 new_channels[category][name]=line.rstrip()
                                 multichannel += 1
                     if len(new_channels)>0:
+                        #把self.channels的收藏保存到cang 到new_channels中
+                        if "我的收藏" in self.channels:
+                            new_channels["我的收藏"] = self.channels["我的收藏"]
                         self.channels = new_channels                    
                     else:
                         QMessageBox.critical(self, '错误', '加载直播源失败，请检查文件格式' )
@@ -801,11 +847,7 @@ class IPTVPlayer(QMainWindow):
             self.old_player.close_player()
         else:
             self.player = MediaPlayer(program_url, thread_lib='python', loglevel='error', ff_opts=ff_opts,callback=self.player_callback)
-        # if not program_url.endswith('m3u8'):
-        #     self.http= False
-        #     self.Duration = None
-        # else:
-        #     self.http= True
+        
 
     def player_callback(self, selector, val):
         if selector == 'eof':            
@@ -830,7 +872,7 @@ class IPTVPlayer(QMainWindow):
                     self.player.close_player()
                     self.stop_event.set()
                     break
-                elif frame is None:
+                elif frame is None:                    
                     time.sleep(0.01)
                 else:
                     image, t = frame
@@ -925,6 +967,7 @@ class IPTVPlayer(QMainWindow):
             url = self.channels[self.selected_group][self.selected_channel]
             if url:                
                 self.play_path(url,tv=True)
+                self.input_path = None
         self.image_label.setFocus()
 
    
