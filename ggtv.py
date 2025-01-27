@@ -26,11 +26,7 @@ def player_log_callback(message,level):
     message = message.strip()
     print(message)
     if message :        
-        # window.setWindowTitle(f"蝈蝈直播TV  出错: {message}" )   
-        # if window.input_path is not None:
-        #     if window.current_media is not None:                
-        #         window.play_path(window.current_media)
-            # if loglevels[level] <= loglevels["error"] and window.current_media in message:
+        
         try:
             if window.current_media in message:                
                 window.switch_program("down")            
@@ -522,61 +518,65 @@ class IPTVPlayer(QMainWindow):
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36 Edg/133.0.0.0',
             'cookie': 'REFERER=37880374'  
             }
+        try:
         # 发送GET请求
-        response = requests.get(url, headers=headers)
-        # 检查请求是否成功
-        if response.status_code == 200:
-            # 使用BeautifulSoup解析HTML内容
-            soup = BeautifulSoup(response.text, 'html.parser')            
-            # # 打印整个HTML文档的内容
-            # print(soup.prettify())
-            # 查找<a href='?page=1&iptv=电影&l=e270e5ed00'>的链接内容
-            links = soup.find_all('a', href=re.compile(r'\?page=\d+&iptv=\S+&l=\S+'))
-            #将链接的文本内容转换为字典
-            for link in links:
-                pages[link.get_text(strip=True)]=link['href']
-            
-            names = soup.find_all('div', class_='tip', attrs={'data-title': 'Play with PC'})
-            rnames = [name.get_text(strip=True) for name in names]
-            # 查找所有class为jsdv的tba元素
-            urls = soup.select('tba:not(.imgw)')
-            rurls = [url.get_text(strip=True) for url in urls]
-            #将names和urls转换为字典
-            channels_dic = dict(zip(rnames, rurls))
-            # 遍历找到的元素并打印其内容
-            result[self.search_input.text()]=channels_dic
-            self.channels = result
-            
-            self.load_groups('')
-            #删除所有分页按钮
-            num_pages = len(self.pages)
-            if num_pages>0:
-                actions = self.toolbar.actions()
-                toolbar_widget_count = len(actions) # toolbar_widget_count = 10
+            response = requests.get(url, headers=headers)
+            # 检查请求是否成功
+            if response.status_code == 200:
+                # 使用BeautifulSoup解析HTML内容
+                soup = BeautifulSoup(response.text, 'html.parser')            
+                # # 打印整个HTML文档的内容
+                # print(soup.prettify())
+                # 查找<a href='?page=1&iptv=电影&l=e270e5ed00'>的链接内容
+                links = soup.find_all('a', href=re.compile(r'\?page=\d+&iptv=\S+&l=\S+'))
+                #将链接的文本内容转换为字典
+                for link in links:
+                    pages[link.get_text(strip=True)]=link['href']
+                
+                names = soup.find_all('div', class_='tip', attrs={'data-title': 'Play with PC'})
+                rnames = [name.get_text(strip=True) for name in names]
+                # 查找所有class为jsdv的tba元素
+                urls = soup.select('tba:not(.imgw)')
+                rurls = [url.get_text(strip=True) for url in urls]
+                #将names和urls转换为字典
+                channels_dic = dict(zip(rnames, rurls))
+                # 遍历找到的元素并打印其内容
+                result[self.search_input.text()]=channels_dic
+                self.channels = result
+                
+                self.load_groups('')
+                #删除所有分页按钮
+                num_pages = len(self.pages)
+                if num_pages>0:
+                    actions = self.toolbar.actions()
+                    toolbar_widget_count = len(actions) # toolbar_widget_count = 10
 
-                # 计算需要删除的小部件的起始索引
-                start_index = max(0, toolbar_widget_count - num_pages)  # start_index = 5
+                    # 计算需要删除的小部件的起始索引
+                    start_index = max(0, toolbar_widget_count - num_pages)  # start_index = 5
 
-                # 删除最后五个小部件
-                for i in range(toolbar_widget_count - 1, start_index - 1, -1):
-                    action = actions[i]
-                    widget = self.toolbar.widgetForAction(action)
-                    if widget:
-                        self.toolbar.removeAction(action)
-                        widget.deleteLater()      
-            # 添加分页按钮
-            self.pages=pages
-            for index,page in  self.pages.items():
-                # 用列表序号创建分页按钮                    
-                self.page_button = QPushButton()
-                self.page_button.setText(index)
-                self.page_button.clicked.connect(self.on_page_clicked)
-                self.toolbar.addWidget(self.page_button)
-        
-            return  
-        else:
-            QMessageBox(f"请求失败，状态码: {response.status_code}")
-            return {},[]       
+                    # 删除最后五个小部件
+                    for i in range(toolbar_widget_count - 1, start_index - 1, -1):
+                        action = actions[i]
+                        widget = self.toolbar.widgetForAction(action)
+                        if widget:
+                            self.toolbar.removeAction(action)
+                            widget.deleteLater()      
+                # 添加分页按钮
+                self.pages=pages
+                for index,page in  self.pages.items():
+                    # 用列表序号创建分页按钮                    
+                    self.page_button = QPushButton()
+                    self.page_button.setText(index)
+                    self.page_button.clicked.connect(self.on_page_clicked)
+                    self.toolbar.addWidget(self.page_button)
+            
+                return  
+            else:
+                QMessageBox(f"请求失败，状态码: {response.status_code}")
+                return {},[] 
+        except requests.exceptions.RequestException as e:
+            QMessageBox(f"请求失败,检查网络连接")
+            return {},[]
     
     def search_channels(self, search_text):
         pages={}
@@ -594,30 +594,33 @@ class IPTVPlayer(QMainWindow):
             'Submit':  '+',
             'city': self.post_secret
         }
-        # 发送GET请求
-        response = requests.post(url, headers=headers,data=data)
-        # 检查请求是否成功
-        if response.status_code == 200:
-            # 使用BeautifulSoup解析HTML内容
-            soup = BeautifulSoup(response.text, 'html.parser')            
-            # # 打印整个HTML文档的内容
-            # 查找<a href='?page=1&iptv=电影&l=e270e5ed00'>的链接内容
-            links = soup.find_all('a', href=re.compile(r'\?page=\d+&iptv=\S+&l=\S+'))
-            for link in links:
-                pages[link.get_text(strip=True)]=link['href']
-            names = soup.find_all('div', class_='tip', attrs={'data-title': 'Play with PC'})
-            rnames = [name.get_text(strip=True) for name in names]
-            # 查找所有class为jsdv的tba元素
-            urls = soup.select('tba:not(.imgw)')
-            rurls = [url.get_text(strip=True) for url in urls]
-            #将names和urls转换为字典
-            channels_dic = dict(zip(rnames, rurls))
-            # 遍历找到的元素并打印其内容
-            result[search_text]=channels_dic
-            # print(result)
-            return result,pages   
-        else:
-            QMessageBox(f"请求失败，状态码: {response.status_code}")
+        try:# 发送GET请求
+            response = requests.post(url, headers=headers,data=data,timeout=5)
+            # 检查请求是否成功
+            if response.status_code == 200:
+                # 使用BeautifulSoup解析HTML内容
+                soup = BeautifulSoup(response.text, 'html.parser')            
+                # # 打印整个HTML文档的内容
+                # 查找<a href='?page=1&iptv=电影&l=e270e5ed00'>的链接内容
+                links = soup.find_all('a', href=re.compile(r'\?page=\d+&iptv=\S+&l=\S+'))
+                for link in links:
+                    pages[link.get_text(strip=True)]=link['href']
+                names = soup.find_all('div', class_='tip', attrs={'data-title': 'Play with PC'})
+                rnames = [name.get_text(strip=True) for name in names]
+                # 查找所有class为jsdv的tba元素
+                urls = soup.select('tba:not(.imgw)')
+                rurls = [url.get_text(strip=True) for url in urls]
+                #将names和urls转换为字典
+                channels_dic = dict(zip(rnames, rurls))
+                # 遍历找到的元素并打印其内容
+                result[search_text]=channels_dic
+                # print(result)
+                return result,pages   
+            else:
+                QMessageBox(f"请求失败，状态码: {response.status_code}")
+                return {},[]
+        except Exception as e:
+            QMessageBox(f"请求失败,检查网络连接")
             return {},[]
             
     def on_restore_clicked(self):
@@ -737,10 +740,13 @@ class IPTVPlayer(QMainWindow):
                 'referer':'https://tonkiang.us/?',
 
             }
-        response = requests.get(url,headers=headers)        
-        if response.status_code != 200:
+        try:
+            response = requests.get(url,headers=headers,timeout=5)        
+            if response.status_code != 200:
+                return None
+        except requests.exceptions.ConnectionError as e:
+            QMessageBox.critical(self, '错误', f'无法在线搜索,请检查网络连接')
             return None
-            
         return response.text
 
     def open_file(self):
