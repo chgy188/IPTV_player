@@ -1,11 +1,12 @@
-#version 1.3.1
-# 2025.1.27
-#修复进程Bug
+#version 1.3.2
+# 2025.1.29
+#自动识别互联网文件类型
 import sys
 from PySide6.QtWidgets import QComboBox,QLineEdit,QToolBar, QPushButton, QSlider, QTextEdit, QVBoxLayout, QProgressBar, QSizePolicy, QApplication, QMainWindow, QListWidget, QHBoxLayout, QWidget, QMenu, QMessageBox, QLabel, QFileDialog, QInputDialog
 from PySide6.QtGui import QKeySequence, QShortcut,QTextCursor,QWheelEvent, QImage, QPixmap, QIcon, QKeyEvent, QMouseEvent, QPalette, QColor, QAction
 from PySide6.QtCore import Qt, Signal,QTimer
 import requests
+from urllib.parse import quote
 from bs4 import BeautifulSoup
 from ffpyplayer.player import MediaPlayer
 from ffpyplayer.writer import MediaWriter
@@ -15,6 +16,7 @@ import time
 import threading
 import json
 import re
+import math
 
 # 设置代理服务器地址和端口
 # os.environ['http_proxy'] = 'http://127.0.0.1:10809'
@@ -264,16 +266,8 @@ class IPTVPlayer(QMainWindow):
     
     def paste_from_clipboard(self):
         # 获取系统剪贴板
-        clipboard = QApplication.clipboard()
-        self.input_path=clipboard.text()
-        if self.input_path.startswith("http"):
-            
-            try:
-                # self.setWindowTitle(f"蝈蝈直播TV -当前直播源: {self.input_path} -加载中...")      
-                self.play_path(self.input_path)
-                self.Duration = None            
-            except Exception as e:
-                self.setWindowTitle(f"蝈蝈直播TV -当前直播源: {self.input_path} -加载失败")      
+        clipboard = QApplication.clipboard()        
+        self.treat_media(clipboard.text())    
             
     def screen_shot(self):
         #将self.image 保存为图片文件
@@ -750,10 +744,10 @@ class IPTVPlayer(QMainWindow):
         return response.text
 
     def open_file(self):
-        if self.player:
-            self.player.toggle_pause()
+        # if self.player:
+        #     self.player.toggle_pause()
         #增加一个提示窗口，选择添加流媒体还是直播源
-        choice=QMessageBox.information(self,"加载啥", "m3u直播源?(Yes)\n\n还是流媒体?(No)",QMessageBox.Yes | QMessageBox.No)
+        # choice=QMessageBox.information(self,"加载啥", "m3u直播源?(Yes)\n\n还是流媒体?(No)",QMessageBox.Yes | QMessageBox.No)
         
         file_path, _ = QFileDialog.getOpenFileName(
             self,
@@ -761,37 +755,66 @@ class IPTVPlayer(QMainWindow):
             "",
             "Media Files (*.m3u *.mp4 *.avi *.mkv *.mov *.flv *.wmv *.mp3 *.wav *.ogg *.flac *.rm *.rmvb *.ts *.m4v *.3gp);;All Files (*)"
         )
+        self.treat_media(file_path)
+        self.setFocus() 
+        
+    def treat_media(self, file_path):    
         if file_path:
-            if choice==QMessageBox.No:                
-                # self.setWindowTitle(f"蝈蝈直播TV -当前直播源: {file_path} -加载中...") 
-                self.input_path = file_path
-                self.play_path(file_path)
-                self.Duration = None
-                self.slider.setfocus()
-                
+            # if choice==QMessageBox.No:  
+            if file_path.startswith("http"): 
+                result=self.is_m3u_list(file_path)             
+                if  result:# self.setWindowTitle(f"蝈蝈直播TV -当前直播源: {file_path} -加载中...") 
+                    if result=='HLS' or result=='OtherMedia':
+                        self.input_path = file_path
+                        self.play_path(file_path)
+                        self.Duration = None
+                        # self.slider.setfocus()
+                        return                                
+            else:                         
+                if not file_path.endswith('.m3u'):
+                    self.input_path = file_path
+                    self.play_path(file_path)
+                    self.Duration = None
+                    # self.slider.setfocus()
+                    return     
+            if self.load_groups(file_path):                    
+                text, ok = QInputDialog.getText(self, '提示', '直播源加载成功，起个名字')
+                if text and ok:            
+                    self.m3u_dict[text] = file_path
+                    self.switch_combo_box.addItem(text)
+                    self.switch_combo_box.setCurrentText(text) 
+                    self.current_m3u = text
+                    self.reload_button.setEnabled(True)
+                    self.edit_button.setEnabled(True)
+                    #修改窗口标题
+                    self.setWindowTitle(f"蝈蝈直播TV -当前直播源: {text}")
+                    return
             else:
-                if self.player:
-                    self.player.toggle_pause()                  
-                if file_path.startswith('http')  or  file_path.endswith('.m3u'):
-                    if self.load_groups(file_path):                    
-                        text, ok = QInputDialog.getText(self, '提示', '直播源加载成功，起个名字')
-                        if text and ok:            
-                            self.m3u_dict[text] = file_path
-                            self.switch_combo_box.addItem(text)
-                            self.switch_combo_box.setCurrentText(text) 
-                            self.current_m3u = text
-                            self.reload_button.setEnabled(True)
-                            self.edit_button.setEnabled(True)
-                            #修改窗口标题
-                            self.setWindowTitle(f"蝈蝈直播TV -当前直播源: {text}")
-                            
-        else: 
-             if self.player:
-                    self.player.toggle_pause()       
-            
-        self.setFocus()      
+                QMessageBox.warning(self, "提示", "导入失败，请检查文件格式", QMessageBox.Ok)
+                return                           
+             
 
-    
+    def is_m3u_list(self,url):
+        try:
+            # 对 URL 进行编码处理
+            encoded_url = quote(url, safe=':/')
+            response = requests.get(encoded_url, timeout=5)
+            response.raise_for_status()  # 检查请求是否成功
+            content = response.text
+            if content.startswith("#EXTM3U"):
+                #判断是否包括"#EXT-X-STREAM-INF"
+                if "#EXT-X-STREAM-INF" in content:
+                    return 'HLS'
+                elif '#EXTINF' in content:
+                    return 'M3U'
+                else:
+                    return 'OtherMedia'
+            else:
+                return 'OtherMedia'    
+
+        except requests.RequestException as e:
+            print(f"请求失败: {e}")
+            return False
 
     def play_path(self, file_path,tv=False):
         if tv:  
@@ -1075,7 +1098,7 @@ class IPTVPlayer(QMainWindow):
                             else:
                                 t = t - begin
                                 self.writer.write_frame(img=image, pts=t, stream=0)
-                        if self.Duration and self.Duration > 0 and t != float('nan'):
+                        if self.Duration and self.Duration > 0 and not math.isnan(t):
                             self.slider.setValue(int(t / self.Duration * 1000))
                         w, h = image.get_size()
                         #保存image到文件，用于测试
@@ -1509,7 +1532,7 @@ if __name__ == "__main__":
     # 检查是否有命令行参数传递
     if len(sys.argv) > 1:
         file_path = sys.argv[1]
-        window.play_path(file_path)
+        window.treat_media(file_path)
     
     window.show()
     # https://iptv-org.github.io/iptv/index.m3u
