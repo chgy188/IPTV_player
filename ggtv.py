@@ -1,10 +1,10 @@
-#version 1.3.2
-# 2025.1.29
-#自动识别互联网文件类型
+#version 1.3.3
+# 2025.2.4
+#多线程筛选频道可用性
 import sys
 from PySide6.QtWidgets import QComboBox,QLineEdit,QToolBar, QPushButton, QSlider, QTextEdit, QVBoxLayout, QProgressBar, QSizePolicy, QApplication, QMainWindow, QListWidget, QHBoxLayout, QWidget, QMenu, QMessageBox, QLabel, QFileDialog, QInputDialog
-from PySide6.QtGui import QKeySequence, QShortcut,QTextCursor,QWheelEvent, QImage, QPixmap, QIcon, QKeyEvent, QMouseEvent, QPalette, QColor, QAction
-from PySide6.QtCore import Qt, Signal,QTimer
+from PySide6.QtGui import QKeySequence, QShortcut,QWheelEvent, QImage, QPixmap, QIcon, QKeyEvent, QMouseEvent, QPalette, QColor, QAction
+from PySide6.QtCore import Qt, Signal,QTimer,QRunnable, QThreadPool, QMutex,QObject
 import requests
 from urllib.parse import quote
 from bs4 import BeautifulSoup
@@ -18,12 +18,40 @@ import json
 import re
 import math
 
+
+MAX_THREAD_COUNT = 500
+
 # 设置代理服务器地址和端口
 # os.environ['http_proxy'] = 'http://127.0.0.1:10809'
 # os.environ['https_proxy'] = 'http://127.0.0.1:10809'
 
+class WorkerSignals(QObject):
+    result = Signal(str,str, str, bool)
+    progress = Signal(str,str)
 
+class UrlTester(QRunnable):
+    def __init__(self, catogory,name, url, timeout=5):
+        super().__init__()
+        self.catogory = catogory
+        self.name = name
+        self.url = url
+        self.timeout = timeout
+        self.signals = WorkerSignals()
+        self._is_stopped = False  # 用于控制任务是否停止
 
+    def run(self):
+        if self._is_stopped:
+            return
+        try:
+            response = requests.get(self.url, timeout=self.timeout)
+            status = response.status_code == 200
+        except Exception:
+            status = False
+        self.signals.progress.emit(self.catogory,self.name)
+        self.signals.result.emit(self.catogory,self.name, self.url, status)
+        
+    def stop(self):
+        self._is_stopped = True  # 标记任务为停止状态
 def player_log_callback(message,level):
     message = message.strip()
     print(message)
@@ -158,7 +186,7 @@ class CustomQLabel(QLabel):
         else:
             #显示右键菜单
             self.show_fav_menu(event.pos())
-            super().mousePressEvent(event)
+        super().mousePressEvent(event)
     def show_fav_menu(self, position):
         menu = QMenu(self)         
         add_fav_action = QAction("收藏", self)
@@ -228,7 +256,7 @@ class IPTVPlayer(QMainWindow):
         self.lock = threading.Lock()
         self.running=False
         self.player = None
-        
+        self.mutex = QMutex()  # 用于线程安全的锁        
         self.current_media = None
         self.input_path=None
         self.video_window = None
@@ -239,7 +267,10 @@ class IPTVPlayer(QMainWindow):
         self.tv=True
         self.create_layout()
         self.create_menu()
-
+        self.workers = []  # 存储所有工作线程
+        self.thread_pool = QThreadPool.globalInstance()
+        # self.thread_pool.setMaxThreadCount(min(os.cpu_count() * 2, 10))  # 限制最大线程数
+        self.thread_pool.setMaxThreadCount(MAX_THREAD_COUNT)
         if self.count_channel_num(self.main_channels) > 0:
             self.channels = self.main_channels
             self.load_groups('')
@@ -320,7 +351,13 @@ class IPTVPlayer(QMainWindow):
             if self.isFullScreen():
                 self.swap_fullscreen()                
             elif not self.image_label.isVisible():
-                self.stop_check=True
+                self.stop_check=True                
+                for worker in self.workers:
+                    worker.stop()
+                self.thread_pool.clear()  # 清理线程池中的未完成任务
+                self.workers.clear()  # 清空任务列表
+                self.stop_test()
+                
             return
         elif event.key() == Qt.Key_Up:
             if self.image_label.isVisible():
@@ -423,7 +460,8 @@ class IPTVPlayer(QMainWindow):
         
         self.delete_button = QPushButton("删除", self)
         self.delete_button.clicked.connect(self.delete_m3u)
-        
+        self.check_button = QPushButton("检测", self)
+        self.check_button.clicked.connect(self.check_channels)
         self.record_button = QPushButton("录制", self)
         self.record_button.clicked.connect(self.record_video)
         self.record_button.setEnabled(False)
@@ -444,8 +482,8 @@ class IPTVPlayer(QMainWindow):
         self.toolbar.addWidget(self.switch_combo_box)      
         self.toolbar.addWidget(self.reload_button)  
         self.toolbar.addWidget(self.edit_button)
-        self.toolbar.addWidget(self.delete_button)
-        
+        self.toolbar.addWidget(self.check_button)
+        self.toolbar.addWidget(self.delete_button)        
         self.toolbar.addWidget(self.record_button)
         
 
@@ -629,7 +667,7 @@ class IPTVPlayer(QMainWindow):
     def show_help_dialog(self):
         QMessageBox.information(self,"帮助", "支持媒体文件拖拽播放\n\n支持Ctrl+V播放粘贴板地址\n\n支持在线搜索\n\n支持视频录制\n\n支持频道可用测试\n\n鼠标：\n\n单击视频显示频道菜单\n\n双击全屏\n\n鼠标滚轮切换频道\n\n快捷键：\n\n回车：全屏/退出全屏\n\n空格：暂停/播放\n\n左右键：快退/快进10秒\n\nP：截图\n\nESC：退出全屏")
     def show_about_dialog(self):
-        QMessageBox.information(self,"关于", "蝈蝈直播TV 1.3.2\n\nCopyright © 2024-2025 蝈蝈直播TV\n\n作者: Robin Guo\n\n本软件遵循GPLv3协议开源,请遵守开源协议。\n\nhttps://github.com/chgy188/IPTV_player")
+        QMessageBox.information(self,"关于", "蝈蝈直播TV 1.3.3n\nCopyright © 2024-2025 蝈蝈直播TV\n\n作者: Robin Guo\n\n本软件遵循GPLv3协议开源,请遵守开源协议。\n\nhttps://github.com/chgy188/IPTV_player")
     def load_m3u(self):
         if self.switch_combo_box.currentText() in self.m3u_dict:
             result=self.load_groups(self.m3u_dict[self.switch_combo_box.currentText()])
@@ -837,6 +875,9 @@ class IPTVPlayer(QMainWindow):
                 return 'temp.m3u'
             else:
                 return None
+        except requests.exceptions.Timeout as e:
+            QMessageBox.critical(self, '错误', f'请求超时，请检查网络连接')
+            return None
         except requests.exceptions.ConnectionError as e:
             QMessageBox.critical(self, '错误', f'失败原因：{e}')
             return None
@@ -938,43 +979,19 @@ class IPTVPlayer(QMainWindow):
         # 添加一些额外的宽度以适应边距和滚动条
         # print(f"max_width: {max_width}-{ horizontal_padding}")
         max_width += horizontal_padding
-
         list_widget.setMaximumWidth(max_width)
 
-    def is_url_accessible(self, url):
-        timeout = 3
-        cursor = self.text_edit.textCursor()
-        cursor.movePosition(QTextCursor.MoveOperation.EndOfLine, QTextCursor.MoveAnchor)
-        if url=="" or url is None:
-            cursor.insertText(f" 检查失败, 已删除。原因: URL为空")
-            QApplication.processEvents()# print(f" 检查失败, 已删除。原因: {respon
-            return False
-        try:
-            response = requests.get(url, timeout=timeout)
-            if response.status_code == 200:                
-                self.text_edit.setTextCursor(cursor)
-                cursor.insertText(f" 检查成功")
-                QApplication.processEvents()
-                return True
-            else:                
-                cursor.insertText(f" 检查失败, 已删除。原因: {response.status_code}")
-                QApplication.processEvents()# print(f" 检查失败, 已删除。原因: {response.status_code}")
-        except requests.exceptions.Timeout:           
-            cursor.insertText(f"--检查超时, 已删除")
-            QApplication.processEvents()# print(f" 检查超时, 已删除")
-        except requests.exceptions.RequestException as e:           
-            cursor.insertText(f"-检查失败, 已删除。原因: {e}\n")
-            QApplication.processEvents()# print(f" 检查失败, 已删除。原因: {e}\n")
-        return False
+     
 
     def check_channels(self):        
         if not self.channels:
             QMessageBox.critical(self, "错误", "请先加载m3u列表.")
             return
-        QMessageBox.information(self, "提示", "准备开始检查,ESC键停止")
-        selected_program_index = self.program_list.currentRow()
+        
+        self.selected_program_index = self.program_list.currentRow()
         self.stop_check=False
         self.text_edit.clear()
+        self.completed = 0
         #禁用text_edit鼠标点击事件
         self.text_edit.mousePressEvent = lambda event: None
         self.menuBar().setDisabled(True)
@@ -987,27 +1004,36 @@ class IPTVPlayer(QMainWindow):
         self.text_edit.mousePressEvent = lambda event: None
         self.text_edit.setVisible(True)
        
-        channels_num = self.count_channel_num(self.channels)
-        checked_num = 0
-        self.progress_bar.setMaximum(channels_num)
-        self.progress_bar.setValue(checked_num)
+        self.channels_num = self.count_channel_num(self.channels)
+        
+        self.progress_bar.setMaximum(self.channels_num)
+        self.progress_bar.setValue(0)
         self.progress_bar.setVisible(True)
-        checking_channels=self.channels.copy()
+        self.checking_channels=self.channels.copy()
         #遍历频道列表，检查每个频道的url是否可访问
-        for catogory, channels in checking_channels.items(): 
+        
+        QMessageBox.information(self, "提示", "准备开始检查,ESC键停止")
+        self.workers.clear()  # 清空之前的线程
+        dnum=0
+        for catogory, channels in self.checking_channels.items(): 
             channels_to_check = channels.copy()
-            for name, url in channels_to_check.items():                 
-                if self.stop_check==True:
+            for name, url in channels_to_check.items(): 
+                if self.stop_check:
                     break
-                self.text_edit.append(f"{checked_num}/{channels_num} 开始检查：-------------- {catogory}-{name}----------------")
-                if not self.is_url_accessible(url):
-                    del checking_channels[catogory][name]             
-                self.progress_bar.setValue(self.progress_bar.value() + 1)
-                checked_num += 1
-                QApplication.processEvents()
+                # 检查线程池的活动线程数
+                
+                worker = UrlTester(catogory,name, url)
+                worker.signals.progress.connect(self.update_progress)
+                worker.signals.result.connect(self.update_result)
+                
+                self.thread_pool.start(worker)
+                self.workers.append(worker)  # 存储工作线程
         
-        QMessageBox.information(self, "提示", f"检查完成,直播源频道总数：原来 {channels_num}个，有效频道：{self.count_channel_num(checking_channels)}个")
-        self.channels=checking_channels
+    def stop_test(self):
+        # 停止所有工作线程
+        
+        QMessageBox.information(self, "提示", f"检查完成,直播源频道总数：原来 {self.channels_num}个，有效频道：{self.count_channel_num(self.checking_channels)}个")
+        self.channels=self.checking_channels
         self.progress_bar.setVisible(False)
         self.text_edit.setVisible(False)
         
@@ -1024,21 +1050,48 @@ class IPTVPlayer(QMainWindow):
         self.load_groups('')
         self.menuBar().show()
         self.group_list.setVisible(True)
-        self.program_list.setCurrentRow(selected_program_index)
+        self.program_list.setCurrentRow(self.selected_program_index)
         self.program_list.setVisible(True)
         self.image_label.setVisible(True)  
         self.menuBar().setDisabled(False)
-        self.setFocus()
+        self.setFocus()   
 
+    def update_progress(self,cat,name):
+        self.mutex.lock()
+        self.completed += 1
+        self.progress_bar.setValue(self.completed)
+        self.mutex.unlock()
+        
+        
+        #判断所有频道检查完成或线程池是否为空，则停止检查
+        # print(f"{cat},{name},{self.completed}")
+        # 打印当前活动的线程数量
+        # print(f"当前活动的线程数量: {self.thread_pool.activeThreadCount()}")
+        if self.completed == self.channels_num:
+            self.stop_test()
+        
+            
+
+    def update_result(self, catogory,name, url, status):
+        result_text = f"{self.completed}/{self.channels_num}-{catogory}{name} -> {'可用' if status else '不可用,删除'}\n"
+        self.text_edit.append(result_text)
+        if  not status:            
+             del self.channels[catogory][name]
+  # 追加结果显示
     def count_channel_num(self,channels):
         count = 0
-        for value in channels.values():
+        # for value in channels.values():
+        for key, value in channels.items():
             if isinstance(value, dict):
                 # 如果值是字典，递归调用函数
-                count += self.count_channel_num(value)
+                # count += self.count_channel_num(value)
+                sub_count = self.count_channel_num(value)
+                count += sub_count
+                # print(f"Group: {key}, Sub Count: {sub_count}, Total Count: {count}")
             else:
                 # 如果值不是字典，计数加1
                 count += 1
+                # print(f"Channel: {key}, Count: {count}")
         return count
 
     def play_program(self, program_url, pos=0):
