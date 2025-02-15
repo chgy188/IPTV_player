@@ -1,10 +1,13 @@
-#version 1.3.2
+#version 1.4
 # 2025.1.29
 #自动识别互联网文件类型
+#修复了切换全屏退出的问题 2025.2.11
+#工具栏布局美化 2025.2.11
+#显示视频转移到主线程 2025。2.15
 import sys
-from PySide6.QtWidgets import QComboBox,QLineEdit,QToolBar, QPushButton, QSlider, QTextEdit, QVBoxLayout, QProgressBar, QSizePolicy, QApplication, QMainWindow, QListWidget, QHBoxLayout, QWidget, QMenu, QMessageBox, QLabel, QFileDialog, QInputDialog
-from PySide6.QtGui import QKeySequence, QShortcut,QWheelEvent, QImage, QPixmap, QIcon, QKeyEvent, QMouseEvent, QPalette, QColor, QPainter, QFont,QAction, QBrush
-from PySide6.QtCore import Qt, Signal,QTimer,QRunnable, QThreadPool, QMutex,QObject
+from PySide6.QtWidgets import QCheckBox,QDialog,QDialogButtonBox,QComboBox,QLineEdit,QToolBar, QPushButton, QSlider, QTextEdit, QVBoxLayout, QProgressBar, QSizePolicy, QApplication, QMainWindow, QListWidget, QHBoxLayout, QWidget, QMenu, QMessageBox, QLabel, QFileDialog, QInputDialog
+from PySide6.QtGui import QKeySequence, QShortcut,QWheelEvent, QImage, QPixmap, QIcon, QKeyEvent, QMouseEvent, QPalette, QColor,QAction
+from PySide6.QtCore import  Qt, Signal,QTimer,QRunnable, QThreadPool, QMutex,QObject,QPropertyAnimation, QPropertyAnimation, QEasingCurve
 import requests
 from urllib.parse import quote
 from bs4 import BeautifulSoup
@@ -19,9 +22,7 @@ import re
 import math
 import os
 
-MAX_THREAD_COUNT = 500
-
-# 设置代理服务器地址和端口
+# # 设置代理服务器地址和端口
 # os.environ['http_proxy'] = 'http://127.0.0.1:10809'
 # os.environ['https_proxy'] = 'http://127.0.0.1:10809'
 
@@ -52,17 +53,6 @@ class UrlTester(QRunnable):
         
     def stop(self):
         self._is_stopped = True  # 标记任务为停止状态
-def player_log_callback(message,level):
-    message = message.strip()
-    print(message)
-    if message :        
-        
-        try:
-            if window.current_media in message:                
-                window.switch_program("down")            
-        except:
-            pass
-    return 0    
 
 class CustomQListWidget(QListWidget):
     change_program= Signal(str)
@@ -182,6 +172,7 @@ class CustomQLabel(QLabel):
     def mousePressEvent(self, event: QMouseEvent):
         if event.button() == Qt.LeftButton:
             if self.parent.channels:                
+                # self.parent.toggle_list_animate()
                 self.parent.toggle_list()
             super().mousePressEvent(event)
         else:
@@ -209,17 +200,21 @@ class CustomQLabel(QLabel):
             
 class IPTVPlayer(QMainWindow):
 
+    player_frame=Signal(QImage)
     player_end=Signal()
  
     def __init__(self):
         super().__init__()
-        self.player_end.connect(self.on_worker_finished)
+        self.close_flag=False
+        self.player_frame.connect(self.update_image_label)
+        self.player_end.connect(self.player_end_slot)
         self.m3u_dict= {}
         self.set_dark_theme()       
         # 加载配置文件
         try:
             with open('config.json', 'r', encoding='utf-8') as f:
                 config = json.load(f)
+            
             
             # 加载 channels 列表
             self.main_channels = config.get('channels',  {'我的收藏': {}})            
@@ -248,9 +243,8 @@ class IPTVPlayer(QMainWindow):
             self.setWindowTitle(f"蝈蝈直播TV")                    
         
         screen = QApplication.primaryScreen().availableGeometry()
-        screensize = screen.size()
-        self.setFixedSize(int(screensize.width() * 0.72), int(screensize.width() * 0.72 / 1.78))
-        # print(f'self:{int(screensize.width() * 0.9)}, {int(screensize.width() * 0.9 / 1.78)}')
+        screensize = screen.size()       
+        self.setMinimumSize(int(screensize.width() * 0.72), int(screensize.width() * 0.72 / 1.78))        
         self.move((screensize.width() - self.width()) // 2, (screensize.height() - self.height()) // 2)
                 
         self.thread = None
@@ -260,7 +254,7 @@ class IPTVPlayer(QMainWindow):
         self.mutex = QMutex()  # 用于线程安全的锁        
         self.current_media = None
         self.input_path=None
-        self.video_window = None
+        
         self.Duration = None
         self.record = False
         self.frame_rate = (0, 0)
@@ -268,7 +262,28 @@ class IPTVPlayer(QMainWindow):
         self.tv=True
         self.create_layout()
         self.create_menu()
-        self.workers = []  # 存储所有工作线程
+        self.http_proxy=config.get('http_proxy', '')
+        self.https_proxy=config.get('https_proxy', '')
+        self.proxy_enable=config.get('proxy_enable', False)
+        if self.proxy_enable:
+            os.environ['http_proxy'] = self.http_proxy
+            os.environ['https_proxy'] = self.https_proxy
+        else:
+            os.environ['http_proxy'] = ''
+            os.environ['https_proxy'] = ''
+        self.workers = []  # 存储所有工作线程           
+        self.installEventFilter(self)
+        self.setAcceptDrops(True)
+        # 添加计时器
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.hide_slider)
+        self.slider.setVisible(False)
+        set_log_callback(self.player_log_callback)
+
+        # 创建一个快捷键Ctrl+V
+        shortcut = QShortcut(QKeySequence("Ctrl+V"), self)
+        shortcut.activated.connect(self.paste_from_clipboard)
+        # self.normal_margin = self.main_layout.getContentsMargins()
         
         if self.count_channel_num(self.main_channels) > 0:
             self.channels = self.main_channels
@@ -280,18 +295,47 @@ class IPTVPlayer(QMainWindow):
         if selected_program_index is not None:            
             if 0 <= selected_program_index < self.program_list.count():
                 self.program_list.setCurrentRow(selected_program_index)
-                
-        self.installEventFilter(self)
-        self.setAcceptDrops(True)
-        # 添加计时器
-        self.timer = QTimer(self)
-        self.timer.timeout.connect(self.hide_slider)
-        self.slider.setVisible(False)
-        set_log_callback(player_log_callback)
+        if self.count_channel_num(self.main_channels) > 0:
+            self.list_container.setVisible(False)
+            self.swap_fullscreen()
+            self.hide_slider()
+        self.setFocus() 
+    
 
-        # 创建一个快捷键Ctrl+V
-        shortcut = QShortcut(QKeySequence("Ctrl+V"), self)
-        shortcut.activated.connect(self.paste_from_clipboard)
+    def player_log_callback(self,message,level):        
+        if message:
+            message = message.strip()
+            # print(message)                    
+            # if self.current_media in message:
+            self.running = False                
+            self.switch_program("down")  
+            self.running = True          
+    
+
+    def player_callback(self, selector, val):               
+        if selector == 'eof':
+            self.player_end.emit()            
+            
+
+    def player_end_slot(self):
+        self.slider.setValue(0)
+        self.input_path=None        
+        if self.current_media:
+            self.play_path(self.current_media,tv=True)
+
+    def toggle_list_animate(self):
+        self.player.toggle_pause()
+        if self.list_container.pos().x() == 0:
+            self.animation.setStartValue(self.list_container.pos())
+            self.animation.setEndValue(self.list_container.pos() - self.list_container.rect().topRight())
+            
+            self.animation.start()
+        else:
+            self.animation.setStartValue(self.list_container.pos())
+            self.animation.setEndValue(self.list_container.pos() + self.list_container.rect().topRight())
+            
+            self.animation.start()
+        self.player.toggle_pause()
     
     
     def paste_from_clipboard(self):
@@ -304,28 +348,31 @@ class IPTVPlayer(QMainWindow):
         current_time = time.strftime("%Y%m%d%H%M%S")
         self.qimage.save(f"{self.selected_group}-{self.selected_channel}-{current_time}screenshot.png")
         QMessageBox.information(self, "截图", f"{self.selected_group}-{self.selected_channel}-{current_time}.png", QMessageBox.Ok)
-    def show_slider(self):
-        QApplication.restoreOverrideCursor()
+    def show_slider(self):        
+        self.setCursor(Qt.ArrowCursor)
+        self.list_container.setVisible(True)
         if not self.tv:
-            self.slider.setVisible(True)
+            self.slider.setVisible(True)            
         self.timer.start(5000)  # 设置计时器为1秒后触发
 
     def toggle_list(self):
-        if self.group_list.isVisible():           
-            self.group_list.setVisible(False)
-            self.program_list.setVisible(False)
+        self.player.toggle_pause()
+        if self.list_container.isVisible(): 
+            self.list_container.setVisible(False)            
             self.timer.start(5000)
-        else:
-            self.group_list.setVisible(True)
-            self.program_list.setVisible(True)            
+        else:            
+            self.list_container.setVisible(True)           
             self.timer.stop()
+        self.player.toggle_pause()
     def hide_slider(self):
-        if self.isFullScreen():
-            self.slider.setVisible(False)
-            self.group_list.setVisible(False)
-            self.program_list.setVisible(False)
-            QApplication.setOverrideCursor(Qt.BlankCursor)
-            self.timer.stop()
+        if self.player:
+            self.player.toggle_pause()        
+        self.slider.setVisible(False)        
+        self.list_container.setVisible(False)
+        if self.player:
+            self.player.toggle_pause()        
+        self.setCursor(Qt.BlankCursor)
+        self.timer.stop()
     
 
     def dragEnterEvent(self, event):
@@ -354,9 +401,9 @@ class IPTVPlayer(QMainWindow):
                 for worker in self.workers:
                     worker.stop()
                 self.thread_pool.clear()  # 清理线程池中的未完成任务
-                self.stop_test()  
-                
-                
+                self.stop_test()
+                if self.player:
+                    self.player.toggle_pause()               
             return
         elif event.key() == Qt.Key_Up:
             if self.image_label.isVisible():
@@ -384,20 +431,21 @@ class IPTVPlayer(QMainWindow):
 
     def closeEvent(self, event):
         if self.player:
-            self.stop_playback()
+            self.running = False
+            self.thread.join()
             self.player.close_player()
         if self.image_label.isVisible():            
          # 保存当前选中的组和节目
             self.save_config()
-            event.accept()
+            self.close_flag=True
+            super().closeEvent(event)
         else:
             QMessageBox.warning(self, "提示", "请先ESC停止检测再退出!", QMessageBox.Ok)
             event.ignore() 
 
     def save_config(self):
         selected_group_index = self.group_list.currentRow()
-        selected_program_index = self.program_list.currentRow()
-        
+        selected_program_index = self.program_list.currentRow()        
         # 保存当前样式（假设样式信息存储在某个变量中）
         current_theme = "dark" if self.app.palette().color(QPalette.Window).name() == "#353535" else "light"        
         # 保存 channels 列表
@@ -405,6 +453,9 @@ class IPTVPlayer(QMainWindow):
         
         # 创建一个字典来存储所有需要保存的数据
         data_to_save = {
+            "http_proxy": self.http_proxy,
+            "https_proxy": self.https_proxy,
+            "proxy_enable": self.proxy_enable,
             "current_m3u": self.current_m3u,
             "m3u_dict": self.m3u_dict,
             "selected_group_index": selected_group_index,
@@ -423,6 +474,11 @@ class IPTVPlayer(QMainWindow):
         open_action.triggered.connect(self.open_file)
         file_menu.addAction(open_action)
 
+        # 添加设置代理服务器选项
+        settings_menu = menubar.addMenu("设置")
+        proxy_settings_action = QAction("设置代理服务器", self)
+        proxy_settings_action.triggered.connect(self.show_proxy_settings_dialog)
+        settings_menu.addAction(proxy_settings_action)
 
         self.toggle_toolbar_action = QAction("显示/隐藏录制工具栏", self, checkable=True)
         self.toggle_toolbar_action.setChecked(False)
@@ -443,9 +499,11 @@ class IPTVPlayer(QMainWindow):
 
         self.toolbar = QToolBar()
         self.addToolBar(Qt.TopToolBarArea, self.toolbar)
-
+        self.toolbar_layout = QHBoxLayout()
+        self.toolbar_layout.setSpacing(0)
+        self.toolbar_layout.setContentsMargins(0, 0, 0, 0)
         self.m3u_name_label = QLabel("当前直播源", self)
-        self.toolbar.addWidget(self.m3u_name_label)
+        
         self.switch_combo_box = QComboBox(self)        
         self.switch_combo_box.setFixedWidth(int(self.width()*0.1))
 
@@ -474,35 +532,99 @@ class IPTVPlayer(QMainWindow):
             self.switch_combo_box.addItems(['无']) 
             self.reload_button.setEnabled(False)
             self.edit_button.setEnabled(False)
-            self.delete_button.setEnabled(False)  
-        # self.switch_combo_box.currentIndexChanged.connect(self.on_combo_box_change)  
-        self.toolbar.addWidget(self.switch_combo_box)      
-        self.toolbar.addWidget(self.reload_button)  
-        self.toolbar.addWidget(self.edit_button)
-        self.toolbar.addWidget(self.check_button)
-        self.toolbar.addWidget(self.delete_button)        
-        self.toolbar.addWidget(self.record_button)
-        
+            self.delete_button.setEnabled(False)         
 
         self.post_secret=self.get_post_secret()
         if self.post_secret is not None:
              # 创建输入框
             self.search_input = QLineEdit()
-            self.toolbar.addWidget(self.search_input)
+            
             self.search_input.setFixedWidth(int(self.width()*0.2))
             self.search_input.setPlaceholderText("输入查询内容")
 
             # 创建查询按钮
             search_button = QPushButton("在线搜索")
             search_button.clicked.connect(self.on_search_clicked)
-            self.toolbar.addWidget(search_button)
+            
 
             # 创建恢复按钮
             self.restore_button = QPushButton("切回直播源")
             self.restore_button.clicked.connect(self.on_restore_clicked)
             self.restore_button.setEnabled(False)
-            self.toolbar.addWidget(self.restore_button)
+            
+            #插入一个spacer
+            spacer = QWidget()
+            self.toolbar_layout.addWidget(self.m3u_name_label,1)
+            self.toolbar_layout.addWidget(self.switch_combo_box,4)      
+            self.toolbar_layout.addWidget(self.reload_button,1)  
+            self.toolbar_layout.addWidget(self.edit_button,1)
+            self.toolbar_layout.addWidget(self.check_button,1)
+            self.toolbar_layout.addWidget(self.delete_button,1)        
+            self.toolbar_layout.addWidget(self.search_input,4)
+            self.toolbar_layout.addWidget(search_button,1)            
+            self.toolbar_layout.addWidget(self.restore_button,1)
+            self.toolbar_layout.addWidget(spacer,3)
+            self.toolbar_layout.addWidget(self.record_button,1)
+            toolbar_widget = QWidget()
+            toolbar_widget.setLayout(self.toolbar_layout)
+            self.toolbar.addWidget(toolbar_widget)
+            
+            
             # self.toolbar.hide()
+    def show_proxy_settings_dialog(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("设置代理服务器")
+
+        layout = QVBoxLayout()
+
+        self.use_proxy_checkbox = QCheckBox("使用代理服务器")
+        if self.proxy_enable:
+            self.use_proxy_checkbox.setChecked(True)
+        else:
+            self.use_proxy_checkbox.setChecked(False)
+
+        http_label = QLabel("HTTP代理地址:")
+        self.http_proxy_edit = QLineEdit()
+        self.http_proxy_edit.setText(self.http_proxy)
+
+        https_label = QLabel("HTTPS代理地址:")
+        self.https_proxy_edit = QLineEdit()
+        self.https_proxy_edit.setText(self.https_proxy)
+
+        layout.addWidget(self.use_proxy_checkbox)
+        layout.addWidget(http_label)
+        layout.addWidget(self.http_proxy_edit)
+        layout.addWidget(https_label)
+        layout.addWidget(self.https_proxy_edit)
+
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box.accepted.connect(dialog.accept)
+        button_box.rejected.connect(dialog.reject)
+
+        layout.addWidget(button_box)
+        dialog.setLayout(layout)
+
+        if dialog.exec() == QDialog.Accepted:
+            self.set_proxy_settings()
+
+    def set_proxy_settings(self):
+        if self.use_proxy_checkbox.isChecked():
+            self.proxy_enable=True
+            http_proxy = self.http_proxy_edit.text()
+            https_proxy = self.https_proxy_edit.text()
+            QMessageBox.information(self, "提示", "代理服务器已开启,请重启软件", QMessageBox.Ok)
+        else:
+            self.proxy_enable=False
+            http_proxy = ''
+            https_proxy = ''
+            QMessageBox.information(self, "提示", "代理服务器已关闭，请重启软件", QMessageBox.Ok)
+        os.environ['http_proxy'] = http_proxy
+        os.environ['https_proxy'] = https_proxy        
+        self.http_proxy = self.http_proxy_edit.text()
+        self.https_proxy = self.https_proxy_edit.text()
+        self.save_config()
+
+        
 
     def on_search_clicked(self):
         #恢复按钮可用
@@ -512,19 +634,17 @@ class IPTVPlayer(QMainWindow):
             if hasattr(self, 'pages'):
                 num_pages = len(self.pages)
                 if num_pages>0:
-                    actions = self.toolbar.actions()
-                    toolbar_widget_count = len(actions)  # toolbar_widget_count = 10
+                    # actions = self.toolbar.actions()
+                    # toolbar_widget_count = len(actions)  # toolbar_widget_count = 10
 
                     # 计算需要删除的小部件的起始索引
-                    start_index = max(0, toolbar_widget_count - num_pages)  # start_index = 5
+                    start_index = max(0, self.toolbar_layout.count() - num_pages-1)  # start_index = 5
 
                     # 删除最后五个小部件
-                    for i in range(toolbar_widget_count - 1, start_index - 1, -1):
-                        action = actions[i]
-                        widget = self.toolbar.widgetForAction(action)
-                        if widget:
-                            self.toolbar.removeAction(action)
-                            widget.deleteLater()
+                    for i in range(self.toolbar_layout.count() - 2, start_index - 1, -1):
+                        widget = self.toolbar_layout.itemAt(i).widget()
+                        self.toolbar_layout.removeWidget(widget)
+                        widget.deleteLater()
             self.result_dict,self.pages=self.search_channels(search_text)
             self.channels = self.result_dict
             self.load_groups('') 
@@ -533,7 +653,8 @@ class IPTVPlayer(QMainWindow):
                 self.page_button = QPushButton()
                 self.page_button.setText(index)
                 self.page_button.clicked.connect(self.on_page_clicked)
-                self.toolbar.addWidget(self.page_button)
+                 # 将按钮添加到工具栏,并放在录制按钮之前                
+                self.toolbar_layout.insertWidget(self.toolbar_layout.count()-2,self.page_button)
 
     def on_page_clicked(self):
         pages={}
@@ -577,19 +698,13 @@ class IPTVPlayer(QMainWindow):
                 #删除所有分页按钮
                 num_pages = len(self.pages)
                 if num_pages>0:
-                    actions = self.toolbar.actions()
-                    toolbar_widget_count = len(actions) # toolbar_widget_count = 10
-
-                    # 计算需要删除的小部件的起始索引
-                    start_index = max(0, toolbar_widget_count - num_pages)  # start_index = 5
+                    start_index = max(0, self.toolbar_layout.count() - num_pages-1)  # start_index = 5
 
                     # 删除最后五个小部件
-                    for i in range(toolbar_widget_count - 1, start_index - 1, -1):
-                        action = actions[i]
-                        widget = self.toolbar.widgetForAction(action)
-                        if widget:
-                            self.toolbar.removeAction(action)
-                            widget.deleteLater()      
+                    for i in range(self.toolbar_layout.count() - 2, start_index - 1, -1):
+                        widget = self.toolbar_layout.itemAt(i).widget()
+                        self.toolbar_layout.removeWidget(widget)
+                        widget.deleteLater()  
                 # 添加分页按钮
                 self.pages=pages
                 for index,page in  self.pages.items():
@@ -597,7 +712,7 @@ class IPTVPlayer(QMainWindow):
                     self.page_button = QPushButton()
                     self.page_button.setText(index)
                     self.page_button.clicked.connect(self.on_page_clicked)
-                    self.toolbar.addWidget(self.page_button)
+                    self.toolbar_layout.insertWidget(self.toolbar_layout.count()-2,self.page_button)
             
                 return  
             else:
@@ -664,8 +779,10 @@ class IPTVPlayer(QMainWindow):
     def show_help_dialog(self):
         QMessageBox.information(self,"帮助", "支持媒体文件拖拽播放\n\n支持Ctrl+V播放粘贴板地址\n\n支持在线搜索\n\n支持视频录制\n\n支持频道可用测试\n\n鼠标：\n\n单击视频显示频道菜单\n\n双击全屏\n\n鼠标滚轮切换频道\n\n快捷键：\n\n回车：全屏/退出全屏\n\n空格：暂停/播放\n\n左右键：快退/快进10秒\n\nP：截图\n\nESC：退出全屏")
     def show_about_dialog(self):
-        QMessageBox.information(self,"关于", "蝈蝈直播TV 1.2\n\nCopyright © 2024-2025 蝈蝈直播TV\n\n作者: Robin Guo\n\n本软件遵循GPLv3协议开源,请遵守开源协议。\n\nhttps://github.com/chgy188/IPTV_player")
+        QMessageBox.information(self,"关于", "蝈蝈直播TV 1.4\n\nCopyright © 2024-2025 蝈蝈直播TV\n\n作者: Robin Guo\n\n本软件遵循GPLv3协议开源,请遵守开源协议。\n\nhttps://github.com/chgy188/IPTV_player")
     def load_m3u(self):
+        if self.player:
+            self.player.toggle_pause()
         if self.switch_combo_box.currentText() in self.m3u_dict:
             result=self.load_groups(self.m3u_dict[self.switch_combo_box.currentText()])
             if not result:
@@ -677,6 +794,9 @@ class IPTVPlayer(QMainWindow):
             self.delete_button.setEnabled(True)
         self.current_m3u = self.switch_combo_box.currentText()
         self.save_config()
+        if self.player:
+            self.player.toggle_pause()
+        
         
     def edit_m3u(self):
         #打开input对话框，编辑频道Url
@@ -698,73 +818,110 @@ class IPTVPlayer(QMainWindow):
 
     def create_layout(self):
         self.central_widget = QWidget()
-        self.setCentralWidget(self.central_widget)
-        self.main_layout = QVBoxLayout(self.central_widget)
+        self.setCentralWidget(self.central_widget)       
         
+        self.group_list = QListWidget()        
+        self.group_list.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.group_list.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.group_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         
-        main_content_layout = QHBoxLayout()
-        self.group_list = QListWidget()
+        self.program_list = CustomQListWidget(self)        
+        self.program_list.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.program_list.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.program_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         
-        self.group_list.setFixedWidth(int(self.width()*0.1))
-        
-        
-        self.program_list = CustomQListWidget(self)
-        self.program_list.setFixedWidth(int(self.width()*0.15))
-        
-        self.program_list.change_program.connect(self.switch_program)
+        self.group_list.itemSelectionChanged.connect(self.on_group_select)
+        self.program_list.change_program.connect(self.switch_program)        
+        self.program_list.itemSelectionChanged.connect(self.on_program_select)
         # self.program_list.setFixedWidth(80)
+        self.list_layout = QHBoxLayout()
+        self.list_layout.addWidget(self.group_list)
+        self.list_layout.addWidget(self.program_list)
 
-        main_content_layout.addWidget(self.group_list)
-        main_content_layout.addWidget(self.program_list)
+        # 创建一个容器QWidget来承载列表布局
+        self.list_container = QWidget(self.central_widget)
+        self.list_container.setLayout(self.list_layout)
+        # self.list_container.setStyleSheet("background: transparent;")
+        self.list_container.setStyleSheet("background-color: rgba(0, 0, 0, 64);")
         
         
-        video_layout = QVBoxLayout()
+        
+        # 创建动画
+        self.animation = QPropertyAnimation(self.list_container, b"pos")
+        self.animation.setDuration(10)
+        self.animation.setEasingCurve(QEasingCurve.OutQuad)
+        
+        video_layout = QVBoxLayout(self.central_widget)
+        video_layout.setContentsMargins(0, 0, 0, 0)
         self.image_label = CustomQLabel(self)
         self.image_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.image_label.setScaledContents(True)
+        self.image_label.setAlignment(Qt.AlignCenter)
+        self.image_label.mouseDoubleClickEvent = self.swap_fullscreen
+        
+        # image = QImage(1024, 768, QImage.Format_ARGB32)                                
+        # #彩虹条纹背景填充
+        # painter = QPainter(image)
+        # # 创建一个 QLinearGradient 对象，定义起始点和结束点
+        # gradient = QLinearGradient(0, 0, 1024, 0)  # 从左到右的渐变
+        # # 定义颜色列表
+        # colors = [
+        #     QColor(255, 0, 0),    # Red
+        #     QColor(255, 165, 0), # Orange
+        #     QColor(255, 255, 0), # Yellow
+        #     QColor(0, 128, 0),   # Green
+        #     QColor(0, 0, 255),   # Blue
+        #     QColor(75, 0, 130),  # Indigo
+        #     QColor(238, 130, 238) # Violet
+        # ]
+        # # 设置渐变颜色
+        # for i in range(len(colors)):
+        #     position = i / (len(colors) - 1)
+        #     gradient.setColorAt(position, colors[i])
+        # # image.fill(Qt.white)  # 填充白色背景                               
+        # painter.fillRect(image.rect(), gradient)
+        # # 结束绘制
+        # painter.end()        
+        # self.image_label.setPixmap(QPixmap.fromImage(image))       
           
         self.slider = CustomSlider(self)
         self.slider.setOrientation(Qt.Horizontal)
         self.slider.setMinimum(0)
         self.slider.setMaximum(1000)
         self.slider.setTickInterval(10)
-        self.slider.setSingleStep(1)
-        
+        self.slider.setSingleStep(1)        
 
         video_layout.addWidget(self.image_label)
-        video_layout.addWidget(self.slider)
-        self.slider.raise_()
-        
-        
-        main_content_layout.addLayout(video_layout)
+        video_layout.addWidget(self.slider)        
         
         self.group_list.setVisible(False)
         self.program_list.setVisible(False)
-        self.slider.setVisible(False)
-
-        self.main_layout.addLayout(main_content_layout)
-        
-        self.video_size = [(self.centralWidget().width() - self.group_list.width() - self.program_list.width()), self.centralWidget().height()]
-       
-        self.video_window = self.image_label
-        self.group_list.itemSelectionChanged.connect(self.on_group_select)
-        self.program_list.itemSelectionChanged.connect(self.on_program_select)
-        self.image_label.mouseDoubleClickEvent = self.swap_fullscreen
+        self.slider.setVisible(False)  
         
         self.progress_bar = QProgressBar(self)
         self.progress_bar.setVisible(False)
-        self.progress_bar.setFixedWidth(self.width() - 24)
+        # self.progress_bar.setFixedWidth(self.width() - 24)
+        self.progress_bar.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)  
 
         self.text_edit = QTextEdit(self)
         self.text_edit.setReadOnly(True)
         self.text_edit.setLineWrapMode(QTextEdit.NoWrap)
         self.text_edit.setVisible(False)
-        self.main_layout.addWidget(self.progress_bar)
-        # self.main_layout.setAlignment(self.progress_bar, Qt.AlignCenter)f
-        self.main_layout.addWidget(self.text_edit)
-        # 获取边框
-        # print(f'{self.centralWidget().height()}-{self.image_label.size()}-{self.slider.height()}')
+        video_layout.addWidget(self.progress_bar)        
+        video_layout.addWidget(self.text_edit)
+        
+        self.list_container.raise_()
+        
+        self.adjustSize()
 
-       
+    def resizeEvent(self, event):
+        # 调整列表容器高度以适应窗口
+        
+        # toolbar_height = self.toolBarArea(self.toolBar()).height()
+        self.list_container.resize(self.list_container.width(), self.height())
+        # self.list_container.move(0, menu_height)  # 避免遮盖菜单栏和工具栏
+        super().resizeEvent(event)
+
     def get_post_secret(self,url= "https://tonkiang.us/ac.php?s=ai&c=ch"):
         # 发送GET请求
         headers = {
@@ -781,7 +938,10 @@ class IPTVPlayer(QMainWindow):
             return None
         return response.text
 
-    def open_file(self):       
+    def open_file(self): 
+        if self.player:
+            self.player.toggle_pause()
+       
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "Open Media File",
@@ -789,11 +949,12 @@ class IPTVPlayer(QMainWindow):
             "Media Files (*.m3u *.mp4 *.avi *.mkv *.mov *.flv *.wmv *.mp3 *.wav *.ogg *.flac *.rm *.rmvb *.ts *.m4v *.3gp);;All Files (*)"
         )
         self.treat_media(file_path)
+        if self.player:
+            self.player.toggle_pause()
         self.setFocus() 
         
     def treat_media(self, file_path):    
-        if file_path:
-            
+        if file_path:            
             if file_path.startswith("http"): 
                 result=self.is_m3u_list(file_path)             
                 if  result:# self.setWindowTitle(f"蝈蝈直播TV -当前直播源: {file_path} -加载中...") 
@@ -805,6 +966,9 @@ class IPTVPlayer(QMainWindow):
                     elif result=='badM3U':  
                         QMessageBox.warning(self, "提示", "加载直播源失败,检查格式！", QMessageBox.Ok)
                         return                                                        
+                else:
+                    QMessageBox.warning(self, "提示", "检查网络！", QMessageBox.Ok)
+                    return
             else:                         
                 if not file_path.endswith('.m3u'):
                     self.input_path = file_path
@@ -833,15 +997,21 @@ class IPTVPlayer(QMainWindow):
     def is_m3u_list(self,url):
         try:
             # 对 URL 进行编码处理
-            encoded_url = quote(url, safe=':/')
-            response = requests.get(encoded_url, timeout=5)
+            encoded_url = quote(url, safe=':/?')
+            headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36 Edg/133.0.0.0'           
+            }
+            response = requests.get(encoded_url,headers=headers, timeout=5)
+            #如果response.type为视频            
             response.raise_for_status()  # 检查请求是否成功
+            if  response.headers.get('Content-Type', '').startswith('video'):
+                return 'HLS'
             content = response.text
             if content.startswith("#EXTM3U"):
                 #判断是否包括"#EXT-X-STREAM-INF"
-                if "#EXT-X-STREAM-INF" in content:
+                if "#EXT-X-VERSION" in content:
                     return 'HLS'
-                elif '#EXTINF' in content:
+                elif 'http' in content:
                     return 'M3U'
                 else:
                     return 'badM3U'
@@ -862,7 +1032,7 @@ class IPTVPlayer(QMainWindow):
             self.tv=False
         
         self.play_program(file_path)
-        self.setFocus()
+        # self.setFocus()
 
     def download_url(self, url):
         try:    
@@ -934,9 +1104,9 @@ class IPTVPlayer(QMainWindow):
         if "我的收藏" in cat_list:
             cat_list.remove("我的收藏")
             cat_list.insert(0, "我的收藏")
-        self.group_list.addItems(cat_list)
+        self.group_list.addItems(cat_list)        
+        self.list_container.setFixedWidth(self.adjust_list_widget_width(self.group_list)+self.program_list.width())       
         self.group_list.setCurrentRow(0)
-        # self.adjust_list_widget_width(self.group_list)
         self.group_list.show()
         return True
    
@@ -972,20 +1142,24 @@ class IPTVPlayer(QMainWindow):
         for index in range(list_widget.count()):
             item = list_widget.item(index)
             max_width = max(max_width, list_widget.fontMetrics().horizontalAdvance(item.text()))
+           
         contents_margins = list_widget.contentsMargins()
-        horizontal_padding = contents_margins.left() + contents_margins.right()+8
+        horizontal_padding = contents_margins.left() + contents_margins.right()+14
         # 添加一些额外的宽度以适应边距和滚动条
         # print(f"max_width: {max_width}-{ horizontal_padding}")
-        max_width += horizontal_padding
-        list_widget.setMaximumWidth(max_width)
-
+        max_width += horizontal_padding        
+        list_widget.setFixedWidth(max_width)
+        return max_width   
+        
+        
      
 
     def check_channels(self):        
         if not self.channels:
             QMessageBox.critical(self, "错误", "请先加载m3u列表.")
             return
-        
+        if self.player:
+            self.player.toggle_pause()
         self.selected_program_index = self.program_list.currentRow()
         self.stop_check=False
         self.text_edit.clear()
@@ -1097,33 +1271,26 @@ class IPTVPlayer(QMainWindow):
         return count
 
     def play_program(self, program_url, pos=0):
+        
         ff_opts = {
-            'analyzeduration': 2000000,
-            'probesize': 5000000,
+            'analyzeduration': 10000000,
+            'probesize': 10000000,
             'infbuf': True,
             'framedrop': True,           
             'sync': 'video',
             'out_fmt': 'yuv420p',
             'color_range': 'pc'
         }
-        with self.lock:
-            # if self.player:                
-            #     self.player.close_player()
-            try:
-                self.player = MediaPlayer(program_url, thread_lib='python',loglevel='error', ff_opts=ff_opts,callback=self.player_callback) 
-            except Exception as e:
-                QMessageBox.critical(self, "错误", f"播放失败: {e}")            
-            
+        with self.lock:           
+            self.player = MediaPlayer(program_url, thread_lib='python',loglevel='quiet', ff_opts=ff_opts,callback=self.player_callback) 
+            self.image_label.setText(f"准备播放:{self.selected_channel}\n\r地址:{program_url}") 
             if not self.running:
+                self.record_button.setEnabled(True)
                 self.running = True                
                 self.thread = threading.Thread(target=self.run)
                 self.thread.start()
 
-    def player_callback(self, selector, val):
-        if selector == 'eof':            
-            self.player_end.emit()
-        elif selector == 'exceptions or thread exits':
-            print(f'player_callback: {val}')
+   
 
     def run(self):
         start_status = self.record
@@ -1131,50 +1298,46 @@ class IPTVPlayer(QMainWindow):
             with self.lock:
                 if self.player:
                     try:                    
-                        size = self.video_window.size()                
+                        # size = self.image_label.size()                
                         frame, val = self.player.get_frame()
-                        metadata = self.player.get_metadata()
-                        if self.Duration is None:
-                            self.Duration = metadata["duration"]
-                        if metadata["frame_rate"] != (0, 0):
-                            self.frame_rate = metadata["frame_rate"]
-                            self.vid_size = metadata["src_vid_size"]
-                        if val == 'eof':
-                            self.player.close_player()
-                            self.stop_event.set()
-                            break
-                        elif frame is None:
+                                               
+                        if frame is None:                         
                             
-                            pixmap = self.image_label.pixmap()
-                            if pixmap is None:
-                                image = QImage(size.width(), size.height(), QImage.Format_ARGB32)
-                                image.fill(Qt.white)  # 填充白色背景                               
-
-                            else:
-                                pixmap = self.image_label.pixmap()
-                                image = pixmap.toImage()
-                            # 使用QPainter在图片上绘制文字
-                            if image:
-                                painter = QPainter(image)
-                                painter.setRenderHint(QPainter.Antialiasing) 
-                                painter.setPen(QColor(255, 255, 255))  
-                                painter.setFont(QFont("Arial", 30))  # 设置字体和大小
-                                text = "加载中..."
-                                text_width = painter.fontMetrics().horizontalAdvance(text)
-                                text_height = painter.fontMetrics().height()
-                                padding = 10  # 文字与边缘的间距
-                                x = image.width() - text_width - padding  # 右对齐
-                                y = text_height + padding  # 上对齐
-                                background_color = QColor(0, 0, 0, 150)  # 黄色背景，透明度150
-                                painter.fillRect(x, y - text_height, text_width, y, background_color)
-                                painter.drawText(x, y, text)  # 在图片中心绘制文字
-                                painter.end()
-                                pixmap = QPixmap.fromImage(image)                            
-                                self.image_label.setPixmap(pixmap)
+                        
+                        # elif frame is None:                                             
+                        #     pixmap = self.image_label.pixmap()
+                        #     if pixmap:                             
+                        #         image = pixmap.toImage()
+                        #     # 使用QPainter在图片上绘制文字
+                        #         if image:
+                        #             painter = QPainter(image)
+                        #             painter.setRenderHint(QPainter.Antialiasing) 
+                        #             painter.setPen(QColor(255, 255, 255))  
+                        #             painter.setFont(QFont("Arial", 30))  # 设置字体和大小
+                        #             text = "加载中..."
+                        #             text_width = painter.fontMetrics().horizontalAdvance(text)
+                        #             text_height = painter.fontMetrics().height()
+                        #             padding = 10  # 文字与边缘的间距
+                        #             x = image.width() - text_width - padding  # 右对齐
+                        #             y = text_height + padding  # 上对齐
+                        #             background_color = QColor(0, 0, 0, 150)  # 黄色背景，透明度150
+                        #             painter.fillRect(x, y - text_height, text_width, y, background_color)
+                        #             painter.drawText(x, y, text)  # 在图片中心绘制文字
+                        #             painter.end()
+                        #             pixmap = QPixmap.fromImage(image) 
+                        #             scaled_pixmap = pixmap.scaled(self.image_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)                           
+                        #             self.image_label.setPixmap(scaled_pixmap)
+                            # self.image_label.setText("加载中...")
                             time.sleep(0.01)
                         else:
-                            image, t = frame
-                            
+                            # print(frame,val)
+                            metadata = self.player.get_metadata()
+                            if self.Duration is None:
+                                self.Duration = metadata["duration"]
+                            if metadata["frame_rate"] != (0, 0):
+                                self.frame_rate = metadata["frame_rate"]
+                                self.vid_size = metadata["src_vid_size"]
+                            image, t = frame                            
                             self.pix_fmt = image.get_pixel_format()
                             if self.record and self.writer:
                                 if not start_status and self.record:
@@ -1186,60 +1349,58 @@ class IPTVPlayer(QMainWindow):
                                     self.writer.write_frame(img=image, pts=t, stream=0)
                             if self.Duration and self.Duration > 0 and not math.isnan(t):
                                 self.slider.setValue(int(t / self.Duration * 1000))
-                            w, h = image.get_size()
-                            #保存image到文件，用于测试
-                            
+                            w, h = image.get_size()                           
                             sws = SWScale(w, h, image.get_pixel_format(), ofmt='rgb24')
-                            rgb_image = sws.scale(image)
-                            
+                            rgb_image = sws.scale(image)                            
                             img_data = rgb_image.to_bytearray()[0]
-                            width, height = image.get_size()
-                            self.qimage = QImage(img_data, width, height, QImage.Format_RGB888)
-                            pixmap = QPixmap.fromImage(self.qimage)
-                            caled_pixmap = pixmap.scaled(size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                            self.video_window.setPixmap(caled_pixmap)
+                            if w> 0 and h > 0:
+                                self.qimage = QImage(img_data, w, h, QImage.Format_RGB888)
+                            self.player_frame.emit(self.qimage)
+                            # pixmap = QPixmap.fromImage(self.qimage)
+                            # caled_pixmap = pixmap.scaled(size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                            # self.image_label.setPixmap(caled_pixmap)
                             time.sleep(val)
                     except Exception as e:
-                        QMessageBox.critical(self, "错误", f"播放失败: {e}")
-
-    def start_playback(self, run):
-        self.record_button.setEnabled(True)
-        self.running = True
-        self.thread = threading.Thread(target=self.run)
-
-
-    def on_worker_finished(self):
-        self.slider.setValue(0)
-        # self.stop_playback()
-        if self.current_media:
-            self.play_path(self.current_media,tv=True)
-        else:
-            self.stop_playback()
-            self.player.close_player()
-            self.player=None
+                        QMessageBox.critical(self, "错误", f"播放失败: {e}") 
+    
+    def update_image_label(self, qimage):        
+        if not qimage.isNull():
+            # painter = QPainter(qimage)
+            # painter.setRenderHint(QPainter.Antialiasing) 
+            # painter.setPen(QColor(255, 255, 255))  
+            # painter.setFont(QFont("Arial", 30))  # 设置字体和大小
+            # text = self.selected_channel
+            # text_width = painter.fontMetrics().horizontalAdvance(text)
+            # text_height = painter.fontMetrics().height()
+            # padding = 6  # 文字与边缘的间距
+            # x = qimage.width() - text_width - padding  # 右对齐
+            # y = text_height + padding  # 上对齐
+            # background_color = QColor(0, 0, 0, 150)  # 黄色背景，透明度150
+            # painter.fillRect(x, y - text_height, text_width, y, background_color)
+            # painter.drawText(x, y, text)  # 在图片中心绘制文字
+            # painter.end()            
+            pixmap = QPixmap.fromImage(qimage)
+            caled_pixmap = pixmap.scaled(self.image_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self.image_label.setPixmap(caled_pixmap)           
+    
 
     def swap_fullscreen(self, event=None):
-        if self.image_label.isVisible():
-            if self.running:
-                if self.isFullScreen():
-                    self.showNormal()
-                    if self.channels:
-                        self.program_list.show()
-                        self.group_list.show()
-                    self.menuBar().show()
-                    if not self.toggle_toolbar_action.isChecked():
-                        self.toolbar.hide()
-                    else:
-                        self.toolbar.show()
-                    self.main_layout.setContentsMargins(*self.normal_margin)
-                else:
-                    self.normal_margin = self.main_layout.getContentsMargins()
-                    self.main_layout.setContentsMargins(0, 0, 0, 0)
-                    self.program_list.hide()
-                    self.group_list.hide()
-                    self.menuBar().hide()
-                    self.toolbar.hide()
-                    self.showFullScreen()
+        self.player.toggle_pause()
+        if self.isFullScreen():    
+            self.list_container.show()
+            self.menuBar().show()
+            if not self.toggle_toolbar_action.isChecked():
+                self.toolbar.hide()
+            else:
+                self.toolbar.show()                    
+            self.showNormal()
+            
+        else:
+            self.list_container.hide()
+            self.menuBar().hide()
+            self.toolbar.hide()
+            self.showFullScreen()
+        self.player.toggle_pause()            
 
     def on_group_select(self):
         
@@ -1250,11 +1411,16 @@ class IPTVPlayer(QMainWindow):
         self.program_list.clear()
         self.program_list.addItems(list(self.channels[self.selected_group].keys()))
         self.program_list.show()
+        # self.adjust_list_widget_width(self.program_list)
+        self.list_container.setFixedWidth(self.adjust_list_widget_width(self.program_list)+self.group_list.width())
         self.image_label.show()
         # self.program_list.setCurrentRow(0)
         self.setFocus()
 
     def on_program_select(self):
+        # 判断是否程序关闭
+        if self.close_flag:
+            return
         items = self.program_list.selectedItems()
         if not items:
             return
@@ -1264,11 +1430,7 @@ class IPTVPlayer(QMainWindow):
             if url:                
                 self.play_path(url,tv=True)
                 self.input_path = None
-        self.setFocus()
-
-   
-
-    
+        # self.setFocus()  
 
     def switch_program(self, str):
         if self.player:
@@ -1280,17 +1442,13 @@ class IPTVPlayer(QMainWindow):
                     return
             else:
                 new_row = current_row + 1
-                if new_row >= self.program_list.count():
-                    new_row = self.program_list.count() - 1
+                if new_row >= self.program_list.count():                    
                     return
             self.program_list.setCurrentRow(new_row)
             # if self.isFullScreen():
             #     self.program_list.hide()
 
-    def stop_playback(self):
-        self.running = False
-        if self.thread:
-            self.thread.join()
+    
 
     def wheelEvent(self, event: QWheelEvent):
         delta = event.angleDelta().y()
@@ -1336,6 +1494,7 @@ class IPTVPlayer(QMainWindow):
             }
 
             QListWidget {
+                
                 background-color: #f5f5f5;
                 border: 1px solid #e0e0e0;
                 border-radius: 4px;
@@ -1496,7 +1655,8 @@ class IPTVPlayer(QMainWindow):
             }
 
             QListWidget {
-                background-color: #353535;
+                background: rgba(224, 224, 224, 0.8);
+                
                 border: 1px solid #565656;
                 border-radius: 4px;
                 padding: 4px;
